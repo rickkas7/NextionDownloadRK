@@ -3,9 +3,6 @@
 
 #include "Particle.h"
 
-///class NextionDownload; // forward declaration
-
-///typedef void (NextionDownload::*StateHandler)(void);
 
 class NextionDownload {
 public:
@@ -24,6 +21,9 @@ public:
 	NextionDownload &withCheckModeAtBoot() { checkMode = CHECK_MODE_AT_BOOT; return *this; }
 
 	NextionDownload &withForceDownload() { forceDownload = true; return *this; }
+
+	NextionDownload &withRetryOnFailure() { retryOnFailure = true; return *this; }
+
 
 	void setup();
 
@@ -49,6 +49,10 @@ public:
 
 	bool startDownload();
 
+	bool getIsDone() const { return isDone; }
+
+	bool getHasRun() const { return hasRun; }
+
 	static const size_t BUFFER_SIZE = 4096; // This size is part of the Nextion protocol and can't really be changed
 	static const unsigned long RETRY_WAIT_TIME_MS = 30000;
 	static const unsigned long DATA_TIMEOUT_TIME_MS = 60000;
@@ -66,6 +70,7 @@ protected:
 	void waitConnectState(void);
 	void headerWaitState(void);
 	void dataWaitState(void);
+	void restartWaitState(void);
 	void retryWaitState(void);
 	void cleanupState(void);
 	void doneState(void);
@@ -79,6 +84,8 @@ protected:
 	int checkMode = CHECK_MODE_AT_BOOT;
 	bool forceDownload = false;
 	int downloadBaud = 115200;
+	bool retryOnFailure = false;
+	unsigned long restartWaitTime = 4000;
 
 	// Misc stuff
 	TCPClient client;
@@ -87,6 +94,8 @@ protected:
 	size_t bufferSize;
 	size_t dataOffset;
 	size_t dataSize;
+	bool hasRun = false;
+	bool isDone = false;
 
 	// State handler stuff
 	std::function<void(NextionDownload&)> stateHandler = &NextionDownload::startState;

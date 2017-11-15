@@ -161,9 +161,6 @@ bool NextionDownload::startDownload() {
 	return readAndDiscard(500, false);
 }
 
-// downloadBaud
-
-
 
 bool NextionDownload::networkReady() {
 #if Wiring_WiFi
@@ -177,76 +174,90 @@ bool NextionDownload::networkReady() {
 
 
 void NextionDownload::startState(void) {
-	stateHandler = &NextionDownload::waitConnectState;
+	if (checkMode == CHECK_MODE_AT_BOOT) {
+		stateHandler = &NextionDownload::waitConnectState;
+	}
 }
 void NextionDownload::waitConnectState(void) {
+	// This is basically WiFi.ready() or Cellular.ready() depending
 	if (networkReady()) {
-		// This is basically WiFi.ready() or Cellular.ready() depending
-		if (buffer == NULL) {
-			buffer = (char *) malloc(BUFFER_SIZE);
-			if (buffer == NULL) {
-				Log.info("could not allocate buffer");
-				stateHandler = &NextionDownload::cleanupState;
-				return;
-			}
-		}
+		// We only get here when using checkMode == CHECK_MODE_AT_BOOT and network is ready
 
-		// Make sure display can be found
-		if (!findBaud()) {
-			Log.info("could not detect display");
+		requestCheck(forceDownload);
+	}
+}
+
+void NextionDownload::requestCheck(bool forceDownload /* = false */) {
+	this->forceDownload = forceDownload;
+
+	if (buffer == NULL) {
+		buffer = (char *) malloc(BUFFER_SIZE);
+		if (buffer == NULL) {
+			Log.info("could not allocate buffer");
 			stateHandler = &NextionDownload::cleanupState;
 			return;
 		}
+	}
 
-		// Connect to server by TCP
-		if (client.connect(hostname, port)) {
-			// Connected by TCP
+	// If we get this far, once we get to done state we can assume that we probably downloaded
+	// firmware, or we gave up
+	hasRun = true;
 
-			char ifModifiedSince[64];
-			ifModifiedSince[0] = 0;
+	// Make sure display can be found
+	if (!findBaud()) {
+		Log.info("could not detect display");
+		stateHandler = &NextionDownload::cleanupState;
+		return;
+	}
 
-			char eepromBuffer[EEPROM_BUFFER_SIZE];
-			EEPROM.get(eepromLocation, eepromBuffer);
-			if (forceDownload) {
-				Log.info("forceDownload");
-			}
-			else
-			if (eepromBuffer[0] != 0xff) {
-				snprintf(ifModifiedSince, sizeof(ifModifiedSince), "If-Modified-Since: %s GMT\r\n", eepromBuffer);
+	// Connect to server by TCP
+	if (client.connect(hostname, port)) {
+		// Connected by TCP
 
-				Log.info("If-Modified-Since %s", eepromBuffer);
-			}
-			else {
-				Log.info("no last modification date");
-			}
+		char ifModifiedSince[64];
+		ifModifiedSince[0] = 0;
 
-			// Send request header
-			size_t count = snprintf(buffer, BUFFER_SIZE,
-					"GET %s HTTP/1.1\r\n"
-					"Host: %s\r\n"
-					"%s"
-					"Connection: close\r\n"
-					"\r\n",
-					pathPartOfUrl.c_str(),
-					hostname.c_str(),
-					ifModifiedSince
-					);
+		char eepromBuffer[EEPROM_BUFFER_SIZE];
+		EEPROM.get(eepromLocation, eepromBuffer);
+		if (forceDownload) {
+			Log.info("forceDownload");
+		}
+		else
+		if (eepromBuffer[0] != 0xff) {
+			snprintf(ifModifiedSince, sizeof(ifModifiedSince), "If-Modified-Since: %s GMT\r\n", eepromBuffer);
 
-			client.write((const uint8_t *)buffer, count);
-
-			bufferOffset = 0;
-
-			Log.info("sent request to %s:%d", hostname.c_str(), port);
-			stateTime = millis();
-			stateHandler = &NextionDownload::headerWaitState;
+			Log.info("If-Modified-Since %s", eepromBuffer);
 		}
 		else {
-			Log.info("failed to connect to %s:%d", hostname.c_str(), port);
-			stateTime = millis();
-			stateHandler = &NextionDownload::retryWaitState;
+			Log.info("no last modification date");
 		}
 
+		// Send request header
+		size_t count = snprintf(buffer, BUFFER_SIZE,
+				"GET %s HTTP/1.1\r\n"
+				"Host: %s\r\n"
+				"%s"
+				"Connection: close\r\n"
+				"\r\n",
+				pathPartOfUrl.c_str(),
+				hostname.c_str(),
+				ifModifiedSince
+				);
+
+		client.write((const uint8_t *)buffer, count);
+
+		bufferOffset = 0;
+
+		Log.info("sent request to %s:%d", hostname.c_str(), port);
+		stateTime = millis();
+		stateHandler = &NextionDownload::headerWaitState;
 	}
+	else {
+		Log.info("failed to connect to %s:%d", hostname.c_str(), port);
+		stateTime = millis();
+		stateHandler = &NextionDownload::retryWaitState;
+	}
+
 }
 
 void NextionDownload::headerWaitState(void) {
@@ -437,14 +448,30 @@ void NextionDownload::dataWaitState(void) {
 				Log.info("md5 hash=%s", str);
 #endif
 
-
-				stateHandler = &NextionDownload::cleanupState;
+				// Wait a few seconds for the display to restart
+				stateHandler = &NextionDownload::restartWaitState;
+				stateTime = millis();
 			}
 		}
 	}
 }
 
+void NextionDownload::restartWaitState(void) {
+	if (millis() - stateTime >= restartWaitTime) {
+		// Reset the baud rate
+		findBaud();
+
+		stateHandler = &NextionDownload::cleanupState;
+	}
+}
+
 void NextionDownload::retryWaitState(void) {
+	if (!retryOnFailure) {
+		// Not retrying on failure (default), so just clean up
+		stateHandler = &NextionDownload::cleanupState;
+		return;
+	}
+
 	if (millis() - stateTime >= RETRY_WAIT_TIME_MS) {
 		stateHandler = &NextionDownload::waitConnectState;
 	}
@@ -462,7 +489,10 @@ void NextionDownload::cleanupState(void) {
 
 
 void NextionDownload::doneState(void) {
-
+	if (!isDone) {
+		Log.info("done");
+		isDone = true;
+	}
 }
 
 
