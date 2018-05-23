@@ -8,10 +8,6 @@
 // this to compare the two.
 // #define USE_MD5 1
 
-#if USE_MD5
-#include "md5.h"
-static MD5_CTX md5_ctx;
-#endif
 
 NextionDownload::NextionDownload(USARTSerial &serial, int eepromLocation) : serial(serial), eepromLocation(eepromLocation)  {
 }
@@ -177,6 +173,9 @@ void NextionDownload::startState(void) {
 	if (checkMode == CHECK_MODE_AT_BOOT) {
 		stateHandler = &NextionDownload::waitConnectState;
 	}
+	else {
+		stateHandler = &NextionDownload::doneState;
+	}
 }
 void NextionDownload::waitConnectState(void) {
 	// This is basically WiFi.ready() or Cellular.ready() depending
@@ -189,6 +188,9 @@ void NextionDownload::waitConnectState(void) {
 
 void NextionDownload::requestCheck(bool forceDownload /* = false */) {
 	this->forceDownload = forceDownload;
+
+	isDone = false;
+	hasRun = false;
 
 	if (buffer == NULL) {
 		buffer = (char *) malloc(BUFFER_SIZE);
@@ -278,6 +280,8 @@ void NextionDownload::headerWaitState(void) {
 	// Read some data
 	int count = client.read((uint8_t *)&buffer[bufferOffset], BUFFER_SIZE - bufferOffset);
 	if (count > 0) {
+		Log.info("bufferOffset=%d count=%d", bufferOffset, count);
+
 		bufferOffset += count;
 		buffer[bufferOffset] = 0;
 

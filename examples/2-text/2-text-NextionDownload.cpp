@@ -13,7 +13,7 @@ NexText t0 = NexText(0, 1, "t0");
 void setup() {
 	Serial.begin(9600);
 
-	displayDownload.withHostname("dev4.rickk.com").withPort(8080).withPathPartOfUrl("/CodeSync2/2-text.tft");
+	displayDownload.withHostname("download.example.com").withPort(8080).withPathPartOfUrl("2-text.tft");
 
 	displayDownload.setup();
 

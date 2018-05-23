@@ -8,7 +8,7 @@ NextionDownload display(Serial1, 0);
 void setup() {
 	Serial.begin(9600);
 
-	display.withHostname("dev4.rickk.com").withPort(8080).withPathPartOfUrl("/CodeSync2/CompPicture_v0_32.tft");
+	display.withHostname("download.example.com").withPort(8080).withPathPartOfUrl("CompPicture_v0_32.tft");
 
 	display.setup();
 }
