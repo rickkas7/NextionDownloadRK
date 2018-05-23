@@ -6,8 +6,12 @@
 // For debugging purposes, it's handy to be able to verify the download part vs. the serial part if you're
 // getting checksum errors. Use md5 to generate the md5sum for your .tft file on your server, then enable
 // this to compare the two.
-//#define USE_MD5 1
+#define USE_MD5 1
 
+#ifdef USE_MD5
+#include "md5.h"
+static MD5_CTX md5_ctx;
+#endif
 
 NextionDownload::NextionDownload(USARTSerial &serial, int eepromLocation) : serial(serial), eepromLocation(eepromLocation)  {
 }
@@ -129,12 +133,14 @@ bool NextionDownload::findBaud() {
 	for(size_t ii = 0; ii < sizeof(bauds)/sizeof(bauds[0]); ii++) {
 		result = tryBaud(bauds[ii]);
 		if (result) {
+			commandBaud = bauds[ii];
 			break;
 		}
 	}
 
 	if (!result) {
 		// Reset to 9600 if not found
+		commandBaud = 9600;
 		serial.begin(9600);
 	}
 	return result;
@@ -147,14 +153,15 @@ bool NextionDownload::startDownload() {
 	sendCommand("");
 	sendCommand("whmi-wri %d,%d,0", dataSize, downloadBaud);
 	delay(50);
-	serial.begin(downloadBaud);
 
+	if (downloadBaud != commandBaud) {
+		serial.begin(downloadBaud);
+	}
 #if USE_MD5
 	MD5_Init(&md5_ctx);
 #endif
 
-
-	return readAndDiscard(500, false);
+	return readAndDiscard(500, true);
 }
 
 
@@ -446,10 +453,6 @@ void NextionDownload::dataWaitState(void) {
 			if (downloadBuffer->bufferOffset == downloadBuffer->bufferSize) {
 				// Got a whole buffer of data (or last partial buffer), send to display
 
-#if USE_MD5
-				MD5_Update(&md5_ctx, downloadBuffer->buffer, downloadBuffer->bufferOffset);
-#endif
-
 				dataOffset += downloadBuffer->bufferOffset;
 
 				downloadBuffer->bufferOffset = 0;
@@ -474,6 +477,10 @@ void NextionDownload::dataWaitState(void) {
 		if (count > spaceLeft) {
 			count = spaceLeft;
 		}
+
+#if USE_MD5
+		MD5_Update(&md5_ctx, &serialBuffer->buffer[serialBuffer->bufferOffset], count);
+#endif
 
 		serial.write((const uint8_t *)&serialBuffer->buffer[serialBuffer->bufferOffset], count);
 		serialBuffer->bufferOffset += count;

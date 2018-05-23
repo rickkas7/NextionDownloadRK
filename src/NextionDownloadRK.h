@@ -97,6 +97,7 @@ protected:
 	String pathPartOfUrl;
 	int checkMode = CHECK_MODE_AT_BOOT;
 	bool forceDownload = false;
+	int commandBaud = 9600;
 	int downloadBaud = 115200;
 	bool retryOnFailure = false;
 	unsigned long restartWaitTime = 4000;
