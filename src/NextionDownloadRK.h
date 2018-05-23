@@ -4,6 +4,19 @@
 #include "Particle.h"
 
 
+class NextionDownloadBuffer {
+public:
+	NextionDownloadBuffer();
+	virtual ~NextionDownloadBuffer();
+
+	static const size_t BUFFER_SIZE = 4096; // This size is part of the Nextion protocol and can't really be changed
+	char buffer[BUFFER_SIZE];
+	size_t bufferOffset = 0;
+	size_t bufferSize = 0;
+	size_t dataOffset = 0;
+};
+
+
 class NextionDownload {
 public:
 	/**
@@ -53,7 +66,7 @@ public:
 
 	bool getHasRun() const { return hasRun; }
 
-	static const size_t BUFFER_SIZE = 4096; // This size is part of the Nextion protocol and can't really be changed
+
 	static const unsigned long RETRY_WAIT_TIME_MS = 30000;
 	static const unsigned long DATA_TIMEOUT_TIME_MS = 60000;
 	static const size_t EEPROM_BUFFER_SIZE = 32;
@@ -72,6 +85,7 @@ protected:
 	void dataWaitState(void);
 	void restartWaitState(void);
 	void retryWaitState(void);
+	void freeBuffers(void);
 	void cleanupState(void);
 	void doneState(void);
 
@@ -89,13 +103,18 @@ protected:
 
 	// Misc stuff
 	TCPClient client;
-	char *buffer = 0;
-	size_t bufferOffset;
-	size_t bufferSize;
+
+	// Only two of these will ever be allocated at the same time
+	NextionDownloadBuffer *downloadBuffer = 0;
+	NextionDownloadBuffer *serialWaitBuffer = 0;
+	NextionDownloadBuffer *serialBuffer = 0;
+	NextionDownloadBuffer *freeBuffer = 0;
+
 	size_t dataOffset;
 	size_t dataSize;
 	bool hasRun = false;
 	bool isDone = false;
+
 
 	// State handler stuff
 	std::function<void(NextionDownload&)> stateHandler = &NextionDownload::startState;

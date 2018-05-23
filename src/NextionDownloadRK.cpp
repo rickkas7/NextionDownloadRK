@@ -6,7 +6,7 @@
 // For debugging purposes, it's handy to be able to verify the download part vs. the serial part if you're
 // getting checksum errors. Use md5 to generate the md5sum for your .tft file on your server, then enable
 // this to compare the two.
-// #define USE_MD5 1
+//#define USE_MD5 1
 
 
 NextionDownload::NextionDownload(USARTSerial &serial, int eepromLocation) : serial(serial), eepromLocation(eepromLocation)  {
@@ -192,14 +192,11 @@ void NextionDownload::requestCheck(bool forceDownload /* = false */) {
 	isDone = false;
 	hasRun = false;
 
-	if (buffer == NULL) {
-		buffer = (char *) malloc(BUFFER_SIZE);
-		if (buffer == NULL) {
-			Log.info("could not allocate buffer");
-			stateHandler = &NextionDownload::cleanupState;
-			return;
-		}
-	}
+	// Allocate new buffers
+	freeBuffers();
+	downloadBuffer = new NextionDownloadBuffer();
+	freeBuffer = new NextionDownloadBuffer();
+
 
 	// If we get this far, once we get to done state we can assume that we probably downloaded
 	// firmware, or we gave up
@@ -235,7 +232,7 @@ void NextionDownload::requestCheck(bool forceDownload /* = false */) {
 		}
 
 		// Send request header
-		size_t count = snprintf(buffer, BUFFER_SIZE,
+		size_t count = snprintf(downloadBuffer->buffer, NextionDownloadBuffer::BUFFER_SIZE,
 				"GET %s HTTP/1.1\r\n"
 				"Host: %s\r\n"
 				"%s"
@@ -246,9 +243,7 @@ void NextionDownload::requestCheck(bool forceDownload /* = false */) {
 				ifModifiedSince
 				);
 
-		client.write((const uint8_t *)buffer, count);
-
-		bufferOffset = 0;
+		client.write((const uint8_t *)downloadBuffer->buffer, count);
 
 		Log.info("sent request to %s:%d", hostname.c_str(), port);
 		stateTime = millis();
@@ -264,7 +259,7 @@ void NextionDownload::requestCheck(bool forceDownload /* = false */) {
 
 void NextionDownload::headerWaitState(void) {
 	if (!client.connected()) {
-		Log.info("server disconnected unexpectedly");
+		Log.info("server disconnected unexpectedly - headerWaitState");
 		stateTime = millis();
 		stateHandler = &NextionDownload::retryWaitState;
 		return;
@@ -277,15 +272,16 @@ void NextionDownload::headerWaitState(void) {
 		stateHandler = &NextionDownload::retryWaitState;
 		return;
 	}
+
 	// Read some data
-	int count = client.read((uint8_t *)&buffer[bufferOffset], BUFFER_SIZE - bufferOffset);
+	int count = client.read((uint8_t *)&downloadBuffer->buffer[downloadBuffer->bufferOffset], NextionDownloadBuffer::BUFFER_SIZE - downloadBuffer->bufferOffset);
 	if (count > 0) {
-		Log.info("bufferOffset=%d count=%d", bufferOffset, count);
+		Log.info("bufferOffset=%d count=%d", downloadBuffer->bufferOffset, count);
 
-		bufferOffset += count;
-		buffer[bufferOffset] = 0;
+		downloadBuffer->bufferOffset += count;
+		downloadBuffer->buffer[downloadBuffer->bufferOffset] = 0;
 
-		char *end = strstr(buffer, "\r\n\r\n");
+		char *end = strstr(downloadBuffer->buffer, "\r\n\r\n");
 		if (end != NULL) {
 			// Have a complete response header
 			*end = 0;
@@ -294,11 +290,13 @@ void NextionDownload::headerWaitState(void) {
 			{
 				int code = 0;
 
-				char *cp = strchr(buffer, ' ');
+				char *cp = strchr(downloadBuffer->buffer, ' ');
 				if (cp) {
 					cp++;
 					code = atoi(cp);
 				}
+				Log.info("http response code=%d", code);
+
 				if (code == 304) {
 					Log.info("file not modified, not downloading again");
 					stateHandler = &NextionDownload::cleanupState;
@@ -317,7 +315,7 @@ void NextionDownload::headerWaitState(void) {
 				// Note the data from the Last-Modified header
 				// Last-Modified: <day-name>, <day> <month> <year> <hour>:<minute>:<second> GMT
 				// Last-Modified: Wed, 21 Oct 2015 07:28:00 GMT
-				char *cp = strstr(buffer, "Last-Modified:");
+				char *cp = strstr(downloadBuffer->buffer, "Last-Modified:");
 				if (cp) {
 					cp += 14; // length of "Last-Modified:"
 
@@ -341,7 +339,7 @@ void NextionDownload::headerWaitState(void) {
 			// Note the data size from the Content-Length. This is required as the Nextion protocol requires
 			// the length before sending segments and we don't have enough RAM to buffer it first.
 			{
-				char *cp = strstr(buffer, "Content-Length:");
+				char *cp = strstr(downloadBuffer->buffer, "Content-Length:");
 				if (cp) {
 					cp += 15; // length of "Content-Length:"
 					while(*cp == ' ') {
@@ -371,11 +369,18 @@ void NextionDownload::headerWaitState(void) {
 			// Discard the header
 			end += 4; // the \r\n\r\n part
 
-			size_t newLength = bufferOffset - (end - buffer);
+			size_t newLength = downloadBuffer->bufferOffset - (end - downloadBuffer->buffer);
 			if (newLength > 0) {
-				memmove(buffer, end, newLength);
+				memmove(downloadBuffer->buffer, end, newLength);
 			}
-			bufferOffset = newLength;
+			downloadBuffer->bufferOffset = newLength;
+			downloadBuffer->bufferSize = NextionDownloadBuffer::BUFFER_SIZE;
+			if (downloadBuffer->bufferSize > dataSize) {
+				downloadBuffer->bufferSize = dataSize;
+			}
+			downloadBuffer->dataOffset = 0;
+
+
 			stateTime = millis();
 			stateHandler = &NextionDownload::dataWaitState;
 		}
@@ -384,14 +389,14 @@ void NextionDownload::headerWaitState(void) {
 }
 
 void NextionDownload::dataWaitState(void) {
-	if (!client.connected()) {
-		Log.info("server disconnected unexpectedly");
+	if (downloadBuffer && !client.connected()) {
+		Log.info("server disconnected unexpectedly - dataWaitState");
 		stateTime = millis();
 		stateHandler = &NextionDownload::retryWaitState;
 		return;
 	}
 	if (millis() - stateTime >= DATA_TIMEOUT_TIME_MS) {
-		Log.info("timed out waiting for data");
+		Log.info("timed out waiting for data - dataWaitState");
 		client.stop();
 
 		stateTime = millis();
@@ -399,34 +404,81 @@ void NextionDownload::dataWaitState(void) {
 		return;
 	}
 
-	// This is the amount of data that's left to read from the server
-	size_t dataLeft = dataSize - dataOffset;
-	if (dataLeft > BUFFER_SIZE) {
-		dataLeft = BUFFER_SIZE;
+	if (downloadBuffer == 0 && serialWaitBuffer == 0 && freeBuffer != 0) {
+		// Start using a new download buffer
+		downloadBuffer = freeBuffer;
+		freeBuffer = 0;
+
+		// This is the amount of data that's left to read from the server
+		downloadBuffer->dataOffset = dataOffset;
+		size_t dataLeft = dataSize - dataOffset;
+		if (dataLeft > NextionDownloadBuffer::BUFFER_SIZE) {
+			dataLeft = NextionDownloadBuffer::BUFFER_SIZE;
+		}
+
+		if (dataLeft > 0) {
+			// This part takes into account that we may have partial data in buf already (bufferOffset bytes)
+			downloadBuffer->bufferOffset = 0;
+
+			downloadBuffer->bufferSize = dataLeft;
+			if (downloadBuffer->bufferSize > NextionDownloadBuffer::BUFFER_SIZE) {
+				downloadBuffer->bufferSize = NextionDownloadBuffer::BUFFER_SIZE;
+			}
+
+			Log.info("reading new buffer at dataOffset=%d bufferSize=%d", dataOffset, downloadBuffer->bufferSize);
+		}
+		else {
+			// Read all data, free the buffer
+			delete downloadBuffer;
+			downloadBuffer = 0;
+		}
 	}
 
-	// This part takes into account that we may have partial data in buf already (bufferOffset bytes)
-	size_t requestSize = dataLeft;
-	if (requestSize > (BUFFER_SIZE - bufferOffset)) {
-		requestSize = BUFFER_SIZE - bufferOffset;
-	}
+	if (downloadBuffer) {
+		size_t reqSize = downloadBuffer->bufferSize - downloadBuffer->bufferOffset;
+		//Log.info("bufferOffset=%d reqSize=%d", downloadBuffer->bufferOffset, dataLeft, reqSize);
 
-	// Log.info("bufferOffset=%d dataLeft=%d requestSize=%d dataOffset=%d", bufferOffset, dataLeft, requestSize, dataOffset);
+		int count = client.read((uint8_t *)&downloadBuffer->buffer[downloadBuffer->bufferOffset], reqSize);
+		if (count > 0) {
+			downloadBuffer->bufferOffset += count;
+			stateTime = millis();
 
-	int count = client.read((uint8_t *)&buffer[bufferOffset], requestSize);
-	if (count > 0) {
-		bufferOffset += count;
-		stateTime = millis();
-
-		if (bufferOffset == dataLeft) {
-			// Got a whole buffer of data (or last partial buffer), send to display
-			Log.info("sending to display dataOffset=%d dataSize=%d", dataOffset, dataSize);
+			if (downloadBuffer->bufferOffset == downloadBuffer->bufferSize) {
+				// Got a whole buffer of data (or last partial buffer), send to display
 
 #if USE_MD5
-			MD5_Update(&md5_ctx, buffer, bufferOffset);
+				MD5_Update(&md5_ctx, downloadBuffer->buffer, downloadBuffer->bufferOffset);
 #endif
 
-			serial.write((const uint8_t *)buffer, bufferOffset);
+				dataOffset += downloadBuffer->bufferOffset;
+
+				downloadBuffer->bufferOffset = 0;
+				serialWaitBuffer = downloadBuffer;
+				downloadBuffer = 0;
+			}
+		}
+	}
+
+	// Do we have sendWait buffer data to promote to sending?
+	if (serialWaitBuffer && serialBuffer == 0) {
+		serialBuffer = serialWaitBuffer;
+		serialWaitBuffer = 0;
+		Log.info("sending dataOffset=%d, bufferSize=%d to serial", serialBuffer->dataOffset, serialBuffer->bufferSize);
+	}
+
+	// Do we have serial data to send?
+	if (serialBuffer) {
+		size_t count = serialBuffer->bufferSize - serialBuffer->bufferOffset;
+
+		size_t spaceLeft = serial.availableForWrite();
+		if (count > spaceLeft) {
+			count = spaceLeft;
+		}
+
+		serial.write((const uint8_t *)&serialBuffer->buffer[serialBuffer->bufferOffset], count);
+		serialBuffer->bufferOffset += count;
+
+		if (serialBuffer->bufferOffset >= serialBuffer->bufferSize) {
 
 			// Wait for the display to acknowledge
 			if (!readAndDiscard(500, true)) {
@@ -435,9 +487,7 @@ void NextionDownload::dataWaitState(void) {
 				return;
 			}
 
-			dataOffset += bufferOffset;
-			bufferOffset = 0;
-			if (dataOffset >= dataSize) {
+			if ((serialBuffer->dataOffset + serialBuffer->bufferOffset) >= dataSize) {
 				Log.info("successfully downloaded");
 
 #if USE_MD5
@@ -452,11 +502,23 @@ void NextionDownload::dataWaitState(void) {
 				Log.info("md5 hash=%s", str);
 #endif
 
+				delete serialBuffer;
+				serialBuffer = 0;
+
 				// Wait a few seconds for the display to restart
 				stateHandler = &NextionDownload::restartWaitState;
 				stateTime = millis();
 			}
+			else {
+				// Allow this buffer to be filled again
+				freeBuffer = serialBuffer;
+				serialBuffer = 0;
+			}
 		}
+		else {
+			// Still writing to display
+		}
+
 	}
 }
 
@@ -481,11 +543,29 @@ void NextionDownload::retryWaitState(void) {
 	}
 }
 
-void NextionDownload::cleanupState(void) {
-	if (buffer != NULL) {
-		free(buffer);
-		buffer = NULL;
+void NextionDownload::freeBuffers(void) {
+	if (downloadBuffer) {
+		delete downloadBuffer;
+		downloadBuffer = 0 ;
 	}
+	if (serialWaitBuffer) {
+		delete serialWaitBuffer;
+		serialWaitBuffer = 0;
+	}
+	if (serialBuffer) {
+		delete serialBuffer;
+		serialBuffer = 0;
+	}
+	if (freeBuffer) {
+		delete freeBuffer;
+		freeBuffer = 0;
+	}
+}
+
+void NextionDownload::cleanupState(void) {
+	Log.info("cleanupState");
+	freeBuffers();
+
 	client.stop();
 
 	stateHandler = &NextionDownload::doneState;
@@ -498,5 +578,14 @@ void NextionDownload::doneState(void) {
 		isDone = true;
 	}
 }
+
+
+NextionDownloadBuffer::NextionDownloadBuffer() {
+}
+
+NextionDownloadBuffer::~NextionDownloadBuffer() {
+
+}
+
 
 
